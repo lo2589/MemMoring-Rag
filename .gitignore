@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+*.db
+*.db-*
+*.key
+.cache/
+.screenshot/
+# design notes and docs never go into git (README and install docs only)
+doc/
+docs/
+design/
