@@ -74,6 +74,10 @@ pip install pytest && python -m pytest -q tests
 
 The tests use a local fake embedder. They make no network calls and cost nothing.
 
+## Origin
+
+This is the author's own original work. No third-party code is reused. The only runtime dependency is numpy, and the only model called is `text-embedding-v4` through Alibaba Cloud Model Studio.
+
 ## License
 
 MIT
