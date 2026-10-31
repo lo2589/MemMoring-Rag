@@ -21,6 +21,7 @@ from .chunk import InputError, iso, required
 from .store import connect, user_path
 
 BUDGET, PER_ROUTE = 30, 20
+EMBED_HEAD, EMBED_TAIL = 1000, 5000     # characters; text-embedding-v4 takes at most 8,192 tokens
 DAY_MS = 86_400_000
 VECTOR_SLOTS = threading.BoundedSemaphore(2)
 MONTHS = {m: i for i, m in enumerate(
@@ -98,6 +99,14 @@ def _vectors(db) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return ids, said, matrix
 
 
+def for_embedding(question: str) -> str:
+    """The part of a question the embedding model can take: its opening and its end, where a
+    long prompt keeps the actual question. The time and keyword routes still see all of it."""
+    if len(question) <= EMBED_HEAD + EMBED_TAIL:
+        return question
+    return question[:EMBED_HEAD] + "\n...\n" + question[-EMBED_TAIL:]
+
+
 def _top_k(body: dict[str, Any]) -> int:
     top_k = body.get("top_k")
     if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
@@ -110,7 +119,7 @@ def search(root: Path, body: dict[str, Any], embedder) -> tuple[list[dict], dict
     path = user_path(root, user_id)
     if not path.exists():
         return [], {"calls": 0, "tokens": 0, "cost_yuan": 0.0}
-    query_vec, stats = embedder([question])
+    query_vec, stats = embedder([for_embedding(question)])
     with connect(path) as db:
         with VECTOR_SLOTS:
             ids, said, matrix = _vectors(db)
