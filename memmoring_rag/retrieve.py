@@ -18,10 +18,13 @@ from typing import Any
 import numpy as np
 
 from .chunk import InputError, iso, required
+from .embed import EmbedUnavailable
 from .store import connect, user_path
 
 BUDGET, PER_ROUTE = 30, 20
-EMBED_HEAD, EMBED_TAIL = 1000, 5000     # characters; text-embedding-v4 takes at most 8,192 tokens
+EMBED_HEAD, EMBED_TAIL = 1000, 3000     # characters; text-embedding-v4 refuses long inputs (8,192 tokens
+LAST_RESORT = 1000                      # for rare CJK), so 4,000 characters stays under it even then
+MAX_TERMS = 64
 DAY_MS = 86_400_000
 VECTOR_SLOTS = threading.BoundedSemaphore(2)
 MONTHS = {m: i for i, m in enumerate(
@@ -83,7 +86,8 @@ def lexical(db, question: str, limit: int) -> list[int]:
     terms = [w for w in re.findall(r"[a-z0-9]+", question.lower()) if len(w) > 2 and w not in STOP]
     if not terms:
         return []
-    expression = " OR ".join(f'"{t}"' for t in dict.fromkeys(terms))
+    terms = list(dict.fromkeys(terms))[-MAX_TERMS:]          # a huge prompt asks its question last
+    expression = " OR ".join(f'"{t}"' for t in terms)
     rows = db.execute("SELECT rowid FROM fts WHERE fts MATCH ? ORDER BY bm25(fts) LIMIT ?",
                       (expression, limit)).fetchall()
     return [r[0] for r in rows]
@@ -107,6 +111,17 @@ def for_embedding(question: str) -> str:
     return question[:EMBED_HEAD] + "\n...\n" + question[-EMBED_TAIL:]
 
 
+def _embed_query(question: str, embedder) -> tuple[np.ndarray | None, dict]:
+    """The question's vector, retried on its last lines if the provider refuses the cut; None
+    when it refuses that too, so search falls back to keywords instead of failing."""
+    for text in (for_embedding(question), question[-LAST_RESORT:]):
+        try:
+            return embedder([text])
+        except EmbedUnavailable:
+            continue
+    return None, {"calls": 0, "tokens": 0, "cost_yuan": 0.0}
+
+
 def _top_k(body: dict[str, Any]) -> int:
     top_k = body.get("top_k")
     if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
@@ -119,22 +134,26 @@ def search(root: Path, body: dict[str, Any], embedder) -> tuple[list[dict], dict
     path = user_path(root, user_id)
     if not path.exists():
         return [], {"calls": 0, "tokens": 0, "cost_yuan": 0.0}
-    query_vec, stats = embedder([for_embedding(question)])
+    query_vec, stats = _embed_query(question, embedder)
     with connect(path) as db:
         with VECTOR_SLOTS:
             ids, said, matrix = _vectors(db)
             if not len(ids):
                 return [], stats
-            sims = matrix @ query_vec[0]
-        score = dict(zip(ids.tolist(), sims.tolist()))
-        by_vector = [int(ids[i]) for i in np.argsort(-sims)[:BUDGET]]
+            sims = matrix @ query_vec[0] if query_vec is not None else None
+        if sims is None:                                    # no vector: keywords stand in for it
+            score: dict[int, float] = {}
+            by_vector = lexical(db, question, BUDGET)
+        else:
+            score = dict(zip(ids.tolist(), sims.tolist()))
+            by_vector = [int(ids[i]) for i in np.argsort(-sims)[:BUDGET]]
         window = time_window(question)
         if window:
             lo, hi, centre = window
             when = dict(zip(ids.tolist(), said.tolist()))
             inside = [i for i, t in when.items() if lo <= t <= hi]
             by_time = sorted(inside, key=lambda i: (abs(when[i] - centre) // DAY_MS if centre else 0,
-                                                    -score[i]))[:PER_ROUTE]
+                                                    -score.get(i, 0.0)))[:PER_ROUTE]
             picked = weave(by_time, by_vector[:PER_ROUTE], lexical(db, question, PER_ROUTE))[:BUDGET]
         else:
             picked = by_vector

@@ -37,3 +37,30 @@ def test_search_with_a_huge_query_embeds_only_the_cut(tmp_path):
     data, _ = search(root, {"query": query, "user_id": "u", "top_k": 1}, embedder)
     assert "Miso" in data[0]["content"]
     assert len(seen) == 1 and len(seen[0]) <= EMBED_HEAD + EMBED_TAIL + 10
+
+
+def test_refused_question_falls_back_to_keywords_instead_of_failing(tmp_path):
+    embedder_ok = embed.Embedder(tmp_path / "cache.db", call=FakeAPI())
+    root = tmp_path / "users"
+    root.mkdir()
+    add(root, body("u", "r1", "I adopted a cat named Miso", "The weather was rainy"), embedder_ok)
+
+    def refusing(texts):
+        raise embed.EmbedUnavailable("embedding provider answered HTTP 400")
+
+    query = "zzz " * 50000 + "what is the name of my cat Miso"
+    data, stats = search(root, {"query": query, "user_id": "u", "top_k": 5}, refusing)
+    assert any("Miso" in d["content"] for d in data) and stats["calls"] == 0
+
+
+def test_rate_limit_is_still_passed_up(tmp_path):
+    root = tmp_path / "users"
+    root.mkdir()
+    add(root, body("u", "r1", "I adopted a cat named Miso"), embed.Embedder(tmp_path / "c.db", call=FakeAPI()))
+
+    def limited(texts):
+        raise embed.RateLimited(5)
+
+    import pytest
+    with pytest.raises(embed.RateLimited):
+        search(root, {"query": "cat", "user_id": "u", "top_k": 1}, limited)
